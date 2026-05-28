@@ -1,0 +1,169 @@
+import numpy as np
+import pandas as pd
+import pickle
+import os
+from sklearn.model_selection import train_test_split
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import accuracy_score
+from xgboost import XGBClassifier
+
+
+match = pd.read_csv(r"C:\Users\Anubhav\Downloads\matches.csv")
+delivery = pd.read_csv(r"C:\Users\Anubhav\Downloads\deliveries.csv")
+
+# Calculate total runs scored in first innings
+total_score_df = delivery.groupby(["match_id", "inning"])["total_runs"].sum().reset_index()
+total_score_df = total_score_df[total_score_df["inning"] == 1]
+
+# Target runs = 1st innings total runs + 1
+total_score_df["target"] = total_score_df["total_runs"] + 1
+total_score_df = total_score_df[["match_id", "target"]]
+
+# Clean and normalize team names
+teams = [
+    "Sunrisers Hyderabad",
+    "Mumbai Indians",
+    "Kolkata Knight Riders",
+    "Chennai Super Kings",
+    "Delhi Capitals",
+    "Kings XI Punjab",
+    "Royal Challengers Bangalore",
+    "Rajasthan Royals"
+]
+
+for col in ["team1", "team2", "winner"]:
+    match[col] = match[col].str.replace("Delhi Daredevils", "Delhi Capitals")
+    match[col] = match[col].str.replace("Deccan Chargers", "Sunrisers Hyderabad")
+
+# Keep only active 8 core teams
+match = match[match["team1"].isin(teams)]
+match = match[match["team2"].isin(teams)]
+
+# Merge target totals with matches
+match = match[["id", "venue", "winner"]]
+match_df = match.merge(total_score_df, left_on="id", right_on="match_id")
+
+# Merge match info with delivery info
+delivery_df = match_df.merge(delivery, on="match_id")
+
+# Keep only the second innings
+delivery_df = delivery_df[delivery_df["inning"] == 2]
+
+# Clean delivery team names
+for col in ["batting_team", "bowling_team"]:
+    delivery_df[col] = delivery_df[col].str.replace("Delhi Daredevils", "Delhi Capitals")
+    delivery_df[col] = delivery_df[col].str.replace("Deccan Chargers", "Sunrisers Hyderabad")
+
+#this is the main feautre engineering
+print("Engineering features\n")
+
+
+delivery_df["current_score"] = delivery_df.groupby("match_id")["total_runs"].cumsum()
+delivery_df["runs_left"] = delivery_df["target"] - delivery_df["current_score"]
+
+
+delivery_df["balls_left"] = 120 - (delivery_df["over"] * 6 + delivery_df["ball"])
+
+
+delivery_df["wickets_fallen"] = delivery_df.groupby("match_id")["is_wicket"].cumsum()
+delivery_df["wickets_left"] = 10 - delivery_df["wickets_fallen"]
+
+# Division safety handling for current run rate (CRR)
+balls_bowled = 120 - delivery_df["balls_left"]
+delivery_df["curr_run_rate"] = np.where(
+    balls_bowled > 0,
+    (delivery_df["current_score"] * 6) / balls_bowled,
+    0.0
+)
+
+# Required run rate (RRR)
+delivery_df["req_run_rate"] = (delivery_df["runs_left"] * 6) / delivery_df["balls_left"]
+
+# Target result: 1 if batting (chasing) team wins, 0 otherwise
+delivery_df["result"] = (delivery_df["batting_team"] == delivery_df["winner"]).astype(int)
+
+
+#exclude final ball where balls_left == 0
+delivery_df = delivery_df[delivery_df["balls_left"] != 0]
+
+# Extract only the features we actually need
+final_df = delivery_df[[
+    "match_id",
+    "batting_team",
+    "bowling_team",
+    "venue",
+    "runs_left",
+    "balls_left",
+    "wickets_left",
+    "curr_run_rate",
+    "req_run_rate",
+    "result"
+]]
+
+final_df = final_df.dropna()
+
+# Features and target
+X = final_df.iloc[:, :-1]
+y = final_df.iloc[:, -1]
+
+# Train-test split
+from sklearn.model_selection import train_test_split
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.2,
+    random_state=42
+)
+
+# Column transformer
+trf = ColumnTransformer([
+    (
+        "trf",
+        OneHotEncoder(
+            sparse_output=False,
+            handle_unknown="ignore"
+        ),
+        ["batting_team", "bowling_team", "venue"]
+    )
+], remainder="passthrough")
+
+# XGBoost pipeline
+pipe = Pipeline([
+    ("step1", trf),
+    ("step2", XGBClassifier(
+        n_estimators=100,#no. of trees
+        learning_rate=0.1,
+        max_depth=5,
+        random_state=42,#randomness locked
+        use_label_encoder=False,
+        eval_metric="logloss"
+    ))
+])
+
+
+
+pipe.fit(X_train, y_train)
+
+
+y_pred = pipe.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+print(f"\nModel accuracy: {accuracy * 100:.2f}%")
+
+#feautre importance validation
+xgb_model = pipe.named_steps["step2"]
+importances = xgb_model.feature_importances_
+
+print("\nModel Feature Weights:")
+print(f"  - Required Run Rate (RRR): {importances[-1]*100:.2f}%")
+print(f"  - Current Run Rate (CRR):  {importances[-2]*100:.2f}%")
+print(f"  - Wickets Left:            {importances[-3]*100:.2f}%")
+print(f"  - Balls Left:              {importances[-4]*100:.2f}%")
+print(f"  - Runs Left:               {importances[-5]*100:.2f}%")
+
+# Save model pipeline
+with open("pipe.pkl", "wb") as f:
+    pickle.dump({"pipeline": pipe}, f)
+print("\nTrained model successfully saved to pipe.pkl")
