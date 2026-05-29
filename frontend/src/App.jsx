@@ -17,7 +17,7 @@ import {
   HelpCircle
 } from 'lucide-react';
 
-const API_BASE_URL = 'http://127.0.0.1:8000';
+const API_BASE_URL = "https://anubhav-10-real-time-ipl-win-prediction-system.hf.space";
 
 const TEAM_THEMES = {
   "Sunrisers Hyderabad": { bg: "from-orange-600 to-yellow-500", text: "text-orange-400", border: "border-orange-500/30", color: "#F97316", lightBg: "bg-orange-950/20" },
